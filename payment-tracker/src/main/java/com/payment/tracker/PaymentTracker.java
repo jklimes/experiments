@@ -3,43 +3,60 @@ package com.payment.tracker;
 import java.io.*;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
+
+import static com.payment.tracker.ConsoleUtils.*;
+import static com.payment.tracker.ConcurrencyUtils.*;
 
 public class PaymentTracker {
-    static class Currency {
-        public Currency(String code, Integer value) {
-            this.code = code;
-            this.value = value;
-        }
-
-        String code;
-        Integer value;
-    }
-
     private static final Map<String, Integer> currencies = new ConcurrentHashMap<>();
     private static volatile String product = null;
-    private static final AtomicBoolean isStillReading = new AtomicBoolean(true);
+    private static volatile String paymentFilePath = null;
 
     public static void main(String[] args) {
-        loadPaymentsFromFile(new File("payment.txt"), currencies);
+        initPaymentFilePath(args);
+        loadPaymentsFromFile();
         startProcessingInput();
         startProducingProduct();
         startPrintingProduct();
         registerShutdownHook();
     }
 
-    private static void registerShutdownHook() {
-        Runtime.getRuntime().addShutdownHook(new Thread(() -> saveCurrenciesToFile()));
+    private static void initPaymentFilePath(String[] args) {
+        if (args.length == 1) {
+            if (!new File(args[0]).exists()) {
+                try {
+                    paymentFilePath = args[0];
+                    new File(paymentFilePath).createNewFile();
+                } catch (IOException e) {
+                    initDefaultPaymentFilePath();
+                }
+            } else {
+                paymentFilePath = args[0];
+            }
+        } else {
+            initDefaultPaymentFilePath();
+        }
     }
 
-    private static void saveCurrenciesToFile() {
-        String s = currenciesToString();
-        try (FileWriter fw = new FileWriter(new File("payment.txt"), false)) {
-            fw.write(s);
-            fw.flush();
+    private static void initDefaultPaymentFilePath() {
+        String home = System.getProperty("user.home");
+        paymentFilePath = home + System.getProperty("file.separator") + "payment.txt";
+        try {
+            new File(paymentFilePath).createNewFile();
         } catch (IOException e) {
             e.printStackTrace();
+        }
+    }
+
+    private static void loadPaymentsFromFile() {
+        File paymentFile = new File(paymentFilePath);
+        try (FileReader fr = new FileReader(paymentFile); BufferedReader bfr = new BufferedReader(fr)) {
+            bfr.lines().forEach(s -> {
+                Currency curr = Currency.fromString(s);
+                currencies.put(curr.code, curr.value);
+            });
+        } catch (IOException e) {
+            System.out.println("File " + paymentFile.getAbsolutePath() + " does not exist.");
         }
     }
 
@@ -52,16 +69,6 @@ public class PaymentTracker {
             }
         }).start();
     }
-
-    private static void startPrintingProduct() {
-        new Thread(() -> {
-            while (true) {
-                printCurrentStateIfReady();
-                sleep(1000);
-            }
-        }).start();
-    }
-
 
     private static void processInput() {
         try {
@@ -76,7 +83,33 @@ public class PaymentTracker {
         String inputLine = readInput();
         cursorPreviousLine(1);
         clearLine();
-        return parseCurrency(inputLine);
+        return Currency.fromString(inputLine);
+    }
+
+    private static String readInput() {
+        InputStream in = System.in;
+        int i;
+        try {
+            StringBuilder sb = new StringBuilder();
+            while ((i = in.read()) != '\n') {
+                sb.append((char) i);
+                sleep(50);
+            }
+            return sb.toString();
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private static void startProducingProduct() {
+        new Thread(() -> {
+            while (true) {
+                synchronized (PaymentTracker.class) {
+                    product = Currency.toString(currencies);
+                    sleep(100);
+                }
+            }
+        }).start();
     }
 
     private static void storeCurrency(Currency currency) {
@@ -94,119 +127,40 @@ public class PaymentTracker {
         }
     }
 
+    private static void startPrintingProduct() {
+        new Thread(() -> {
+            while (true) {
+                printCurrentStateIfReady();
+                sleep(1000);
+            }
+        }).start();
+    }
+
     private static void printCurrentStateIfReady() {
         if (product != null) {
             saveCursorPosition();
-            clearScreen(ClearScreen.FROM_CURSOR_TO_END);
-            System.out.print("\n" +product);
+            clearScreen(ClearScreenMode.FROM_CURSOR_TO_END);
+            System.out.print("\n" + product);
             restoreCursorPosition();
             product = null;
         }
     }
 
+    private static void registerShutdownHook() {
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            saveCurrenciesToFile();
+            clearScreen(ClearScreenMode.FROM_CURSOR_TO_END);
+        }));
+    }
 
-    private static void loadPaymentsFromFile(File input, Map<String, Integer> currencies) {
-        try (FileReader fr = new FileReader(input); BufferedReader bfr = new BufferedReader(fr)) {
-            bfr.lines().forEach(s -> {
-                Currency curr = parseCurrency(s);
-                currencies.put(curr.code, curr.value);
-            });
+    private static void saveCurrenciesToFile() {
+        String s = Currency.toString(currencies);
+        try (FileWriter fw = new FileWriter(new File(paymentFilePath), false)) {
+            fw.write(s);
+            fw.flush();
         } catch (IOException e) {
-            System.out.println("File " + input.getAbsolutePath() + " does not exist.");
-        }
-    }
-
-    private static Currency parseCurrency(String s) {
-        String[] tokens = s.split(" ");
-        if (tokens.length != 2) {
-            return null;
-        }
-        String currency = tokens[0].toUpperCase();
-        Integer value;
-        try {
-            value = Integer.valueOf(tokens[1].trim());
-        } catch (NumberFormatException e) {
-            return null;
-        }
-        return new Currency(currency, value);
-    }
-
-    private static String readInput() {
-        InputStream in = System.in;
-        int i;
-        try {
-            StringBuilder sb = new StringBuilder();
-            isStillReading.set(true);
-            while ((i = in.read()) != '\n') {
-                sb.append((char) i);
-                sleep(50);
-            }
-            isStillReading.set(false);
-            return sb.toString();
-        } catch (IOException e) {
-            throw new RuntimeException(e);
-        }
-    }
-
-    private static void sleep(int millis) {
-        try {
-            TimeUnit.MILLISECONDS.sleep(millis);
-        } catch (InterruptedException e) {
             e.printStackTrace();
         }
     }
 
-    private static void cursorLeft(int numOfChars) {
-        System.out.print("\u001b[" + numOfChars + "C");
-    }
-
-    private static void cursorUp(int numOfLines) {
-        System.out.print("\u001b[" + numOfLines + "A");
-    }
-    private static void cursorPreviousLine(int numOfLines) {
-        System.out.print("\u001b[" + numOfLines + "F");
-    }
-
-    private static void clearLine() {
-        System.out.print("\u001b[2K");
-    }
-
-    private static void saveCursorPosition() {
-        System.out.print("\u001b[s");
-    }
-
-    private static void restoreCursorPosition() {
-        System.out.print("\u001b[u");
-    }
-
-    static enum ClearScreen {
-        COMPLETE, FROM_CURSOR_TO_BEGINNING, FROM_CURSOR_TO_END;
-    }
-
-    private static void clearScreen(ClearScreen mode) {
-        switch (mode) {
-            case COMPLETE: System.out.print("\u001b[2J");
-            case FROM_CURSOR_TO_BEGINNING: System.out.print("\u001b[1J");
-            case FROM_CURSOR_TO_END: System.out.print("\u001b[0J");
-        }
-    }
-
-
-    private static void startProducingProduct() {
-        new Thread(() -> {
-            while (true) {
-                synchronized (PaymentTracker.class) {
-                    product = currenciesToString();
-                    sleep(100);
-                }
-            }
-        }).start();
-    }
-
-    private static String currenciesToString() {
-        return currencies.entrySet().stream().collect(
-                StringBuilder::new,
-                (o, stringIntegerEntry) -> o.append(stringIntegerEntry.getKey() + " " + stringIntegerEntry.getValue() + "\n"),
-                StringBuilder::append).toString();
-    }
 }
