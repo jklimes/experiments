@@ -17,3 +17,5 @@ include 'services:webservice'
 
 rootProject.name = 'experiments'
 include 'payment-tracker', 'socket'
+include 'file-lock'
+
